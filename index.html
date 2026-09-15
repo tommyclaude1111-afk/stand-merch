@@ -160,6 +160,32 @@
   .size-chip.out{ opacity:0.45; cursor:not-allowed; background:transparent; }
   .size-chip.out .qty{ color:var(--danger); }
   .size-chip:not(.out):hover{ background:var(--line); }
+  .size-chip .qty.reserved{ color:var(--accent); }
+
+  /* panier */
+  .cart-panel{
+    background:var(--panel); border:1px solid var(--accent); border-radius:var(--radius);
+    box-shadow:var(--shadow); margin-bottom:16px; overflow:hidden;
+  }
+  .cart-head{
+    display:flex; align-items:baseline; justify-content:space-between; gap:10px;
+    padding:12px 16px; border-bottom:1px solid var(--line);
+  }
+  .cart-head h3{ font-family:var(--font-display); font-size:20px; letter-spacing:0.03em; }
+  .cart-head .cart-count{ font-family:var(--font-mono); font-size:12.5px; color:var(--ink-dim); font-weight:600; }
+  .cart-lines .log-row:last-child{ border-bottom:none; }
+  .cart-lines{ max-height:240px; overflow-y:auto; }
+  .cart-lines .log-row .cart-qty{ font-family:var(--font-mono); font-size:12.5px; font-weight:700; width:28px; text-align:right; }
+  .cart-dec{
+    flex-shrink:0; width:22px; height:22px; border-radius:50%; border:1px solid var(--line);
+    background:var(--panel-2); color:var(--ink-dim); font-size:14px; line-height:1; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .cart-dec:hover{ background:var(--line); color:var(--ink); }
+  .cart-foot{ display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid var(--line); background:var(--panel-2); }
+  .cart-total{ flex:1; font-family:var(--font-mono); font-size:20px; font-weight:700; }
+  .cart-total .cart-total-label{ font-family:var(--font-body); font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:var(--ink-dim); display:block; font-weight:700; }
+  .sheet-hint{ font-size:12.5px; color:var(--ink-dim); margin:-8px 0 14px; }
 
   /* STOCK tab */
   .stock-card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow); margin-bottom:14px; }
@@ -433,6 +459,7 @@
   function logoutToGate(){
     setGateOpen(false);
     setAdmin(false);
+    cart = [];
     var gateForm = document.getElementById("site-gate-form");
     if(gateForm) gateForm.reset();
     var gateErr = document.getElementById("gate-error");
@@ -668,7 +695,8 @@
       document.getElementById("go-stock").onclick = function(){ document.querySelector('nav.tabs button[data-tab="stock"]').click(); };
       return;
     }
-    var html = '<div class="ref-grid">';
+    var html = cartHtml();
+    html += '<div class="ref-grid">';
     state.references.forEach(function(ref){
       html += '<div class="ref-card">';
       html += '<h3>' + escapeHtml(ref.nom) + '</h3>';
@@ -678,11 +706,12 @@
       html += '</div>';
       html += '<div class="size-row">';
       SIZES_ALL.filter(function(sz){ return ref.tailles[sz]; }).forEach(function(sz){
-        var qty = ref.tailles[sz].stock;
+        var reserved = cartQtyFor(ref.id, sz);
+        var qty = ref.tailles[sz].stock - reserved;
         var st = stockStatus(qty);
         html += '<button class="size-chip ' + (st==="out"?"out":st==="low"?"low":"") + '" ' + (st==="out"?"disabled":"") +
           ' data-ref="' + ref.id + '" data-size="' + sz + '">' +
-          '<span class="sz">' + sz + '</span><span class="qty">' + (st==="out"?"rupture":qty) + '</span></button>';
+          '<span class="sz">' + sz + '</span><span class="qty' + (reserved>0?" reserved":"") + '">' + (st==="out"?"rupture":qty) + '</span></button>';
       });
       html += '</div></div>';
     });
@@ -693,21 +722,138 @@
         openTarifSheet(chip.dataset.ref, chip.dataset.size);
       });
     });
+    wireCart(el);
   }
 
   function openTarifSheet(refId, size){
     var ref = refById(refId);
     if(!ref) return;
     var body =
+      '<p class="sheet-hint">Choisissez le tarif pour ajouter au panier.</p>' +
       '<button class="tarif-btn plein" data-tarif="plein"><span>Plein tarif</span><span class="price num">' + euro(ref.prixPlein) + '</span></button>' +
       '<button class="tarif-btn staff" data-tarif="staff"><span>Tarif staff</span><span class="price num">' + euro(ref.prixStaff) + '</span></button>';
     openSheet(escapeHtml(ref.nom) + " — " + size, body);
     sheetBody.querySelectorAll(".tarif-btn").forEach(function(b){
       b.addEventListener("click", function(){
-        recordSale(ref.id, size, b.dataset.tarif);
+        addToCart(ref.id, size, b.dataset.tarif);
         closeSheet();
       });
     });
+  }
+
+  // ---------- panier ----------
+  // En mémoire uniquement : jamais enregistré ni synchronisé tant que la vente n'est pas validée.
+  var cart = [];
+
+  function cartQtyFor(refId, size){
+    return cart.reduce(function(n, l){ return n + (l.refId === refId && l.taille === size ? l.qty : 0); }, 0);
+  }
+  function cartCount(){ return cart.reduce(function(n, l){ return n + l.qty; }, 0); }
+  function cartTotal(){ return cart.reduce(function(n, l){ return n + l.qty * l.prix; }, 0); }
+
+  function addToCart(refId, size, tarif){
+    var ref = refById(refId);
+    if(!ref || !ref.tailles[size]) return;
+    if(ref.tailles[size].stock - cartQtyFor(refId, size) <= 0){ toast("Stock insuffisant pour cette taille"); return; }
+    var line = cart.find(function(l){ return l.refId === refId && l.taille === size && l.tarif === tarif; });
+    if(line){ line.qty += 1; }
+    else {
+      cart.push({ id: uid(), refId: refId, refNom: ref.nom, taille: size, tarif: tarif,
+                  prix: tarif === "staff" ? ref.prixStaff : ref.prixPlein, qty: 1 });
+    }
+    renderVente();
+  }
+
+  function cartRemoveOne(lineId){
+    var i = cart.findIndex(function(l){ return l.id === lineId; });
+    if(i === -1) return;
+    cart[i].qty -= 1;
+    if(cart[i].qty <= 0) cart.splice(i, 1);
+    renderVente();
+  }
+
+  function cartRemoveLine(lineId){
+    var i = cart.findIndex(function(l){ return l.id === lineId; });
+    if(i === -1) return;
+    cart.splice(i, 1);
+    renderVente();
+  }
+
+  function cartHtml(){
+    if(cart.length === 0) return "";
+    var n = cartCount();
+    var html = '<div class="cart-panel"><div class="cart-head"><h3>Panier</h3>' +
+      '<span class="cart-count">' + n + ' article' + (n>1?"s":"") + '</span></div>';
+    html += '<div class="cart-lines">';
+    cart.forEach(function(l){
+      html += '<div class="log-row" data-line-id="' + l.id + '">' +
+        '<span class="ref">' + escapeHtml(l.refNom) + ' · ' + l.taille + '</span>' +
+        '<span class="tag ' + l.tarif + '">' + (l.tarif==="staff"?"Staff":"Plein") + '</span>' +
+        '<span class="cart-qty">×' + l.qty + '</span>' +
+        '<span class="price num">' + euro(l.qty * l.prix) + '</span>' +
+        '<button class="cart-dec" title="Retirer une unité" aria-label="Retirer une unité">&minus;</button>' +
+        '<button class="log-row-cancel" title="Retirer cette ligne" aria-label="Retirer cette ligne">&times;</button></div>';
+    });
+    html += '</div>';
+    html += '<div class="cart-foot">' +
+      '<span class="cart-total"><span class="cart-total-label">Total</span>' + euro(cartTotal()) + '</span>' +
+      '<button class="btn ghost danger sm" id="cart-clear">Vider</button>' +
+      '<button class="btn primary" id="cart-validate">Valider la vente</button>' +
+      '</div></div>';
+    return html;
+  }
+
+  function wireCart(el){
+    el.querySelectorAll(".cart-lines .log-row").forEach(function(row){
+      var id = row.dataset.lineId;
+      row.querySelector(".cart-dec").addEventListener("click", function(){ cartRemoveOne(id); });
+      row.querySelector(".log-row-cancel").addEventListener("click", function(){ cartRemoveLine(id); });
+    });
+    var clear = el.querySelector("#cart-clear");
+    if(clear) clear.addEventListener("click", function(){
+      showConfirm("Vider le panier ? Aucune vente ne sera enregistrée.",
+        function(){ cart = []; renderVente(); toast("Panier vidé"); },
+        { confirmLabel: "Vider le panier", danger: true });
+    });
+    var validate = el.querySelector("#cart-validate");
+    if(validate) validate.addEventListener("click", validateCart);
+  }
+
+  function validateCart(){
+    if(cart.length === 0) return;
+    var ids = [], skipped = 0, total = 0;
+    cart.forEach(function(l){
+      var ref = refById(l.refId);
+      for(var i = 0; i < l.qty; i++){
+        if(!ref || !ref.tailles[l.taille] || ref.tailles[l.taille].stock <= 0){ skipped++; continue; }
+        ref.tailles[l.taille].stock -= 1;
+        var sale = { id: uid(), ts: Date.now(), refId: ref.id, refNom: ref.nom, taille: l.taille, tarif: l.tarif, prix: l.prix };
+        state.sales.push(sale);
+        ids.push(sale.id);
+        total += l.prix;
+      }
+    });
+    cart = [];
+    saveState();
+    renderVente(); renderRapport();
+    if(ids.length === 0){ toast("Stock insuffisant — aucune vente enregistrée"); return; }
+    var msg = ids.length + " article" + (ids.length>1?"s":"") + " · " + euro(total);
+    if(skipped > 0) msg += " (" + skipped + " ignoré" + (skipped>1?"s":"") + ", stock insuffisant)";
+    toast(msg, function(){ undoOrder(ids); });
+  }
+
+  function undoOrder(ids){
+    ids.forEach(function(id){
+      var idx = state.sales.findIndex(function(s){ return s.id === id; });
+      if(idx === -1) return;
+      var sale = state.sales[idx];
+      var ref = refById(sale.refId);
+      if(ref && ref.tailles[sale.taille]) ref.tailles[sale.taille].stock += 1;
+      state.sales.splice(idx, 1);
+    });
+    saveState();
+    renderVente(); renderRapport();
+    toast("Vente annulée");
   }
 
   function openDonSheet(refId){
@@ -745,20 +891,6 @@
       closeSheet();
       renderStock(); renderVente();
       toast("Don enregistré — " + qty + " × " + ref.nom + " " + taille);
-    });
-  }
-
-  function recordSale(refId, size, tarif){
-    var ref = refById(refId);
-    if(!ref || !ref.tailles[size] || ref.tailles[size].stock <= 0) return;
-    ref.tailles[size].stock -= 1;
-    var prix = tarif === "staff" ? ref.prixStaff : ref.prixPlein;
-    var sale = { id: uid(), ts: Date.now(), refId: ref.id, refNom: ref.nom, taille: size, tarif: tarif, prix: prix };
-    state.sales.push(sale);
-    saveState();
-    renderVente();
-    toast((tarif === "staff" ? "Tarif staff" : "Plein tarif") + " · " + ref.nom + " " + size + " · " + euro(prix), function(){
-      undoSale(sale.id);
     });
   }
 
@@ -1212,6 +1344,11 @@
     });
     var closeBtn = document.getElementById("btn-close-session");
     if(closeBtn) closeBtn.addEventListener("click", function(){
+      if(cart.length > 0){
+        var n = cartCount();
+        toast("Panier en cours (" + n + " article" + (n>1?"s":"") + ") — validez-le ou videz-le avant de clôturer");
+        return;
+      }
       showConfirm(
         "Clôturer la soirée ? Le journal sera archivé (le classeur Excel reste téléchargeable à la demande depuis Stock), et vous reviendrez à l'écran de connexion.",
         function(){
