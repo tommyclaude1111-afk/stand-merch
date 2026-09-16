@@ -200,7 +200,8 @@
   .field.text input{ font-family:var(--font-body); font-weight:700; }
   .row2{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .sizes-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(80px,1fr)); gap:10px; margin-top:6px; }
-  .stock-foot{ display:flex; justify-content:space-between; align-items:center; margin-top:14px; gap:10px; }
+  .stock-foot{ display:flex; justify-content:space-between; align-items:center; margin-top:14px; gap:10px; flex-wrap:wrap; }
+  .stock-foot-group{ display:flex; gap:8px; flex-wrap:wrap; }
 
   .lock-screen{ max-width:340px; margin:40px auto; text-align:center; }
   .lock-screen .icon{ width:44px; height:44px; margin:0 auto 14px; color:var(--ink-dim); }
@@ -482,7 +483,7 @@
       var raw = localStorage.getItem(STORE_KEY);
       if(raw) return JSON.parse(raw);
     }catch(e){}
-    return { references: [], sales: [], history: [], dons: [], sessionStart: Date.now() };
+    return { references: [], sales: [], history: [], dons: [], pertes: [], sessionStart: Date.now() };
   }
   function cacheLocally(s){
     try{ localStorage.setItem(STORE_KEY, JSON.stringify(s)); }catch(e){}
@@ -533,6 +534,7 @@
         if(!state.sales) state.sales = [];
         if(!state.history) state.history = [];
         if(!state.dons) state.dons = [];
+        if(!state.pertes) state.pertes = [];
         if(!state.sessionStart) state.sessionStart = Date.now();
         cacheLocally(state);
         if(doc.metadata.fromCache){ setSyncStatus("hors-ligne (cache)", "warn"); }
@@ -894,6 +896,55 @@
     });
   }
 
+  function openPerteSheet(refId){
+    var ref = refById(refId);
+    if(!ref) return;
+    var sizes = SIZES_ALL.filter(function(sz){ return ref.tailles[sz] && ref.tailles[sz].stock > 0; });
+    if(sizes.length === 0){
+      toast("Aucun stock pour cette référence");
+      return;
+    }
+    var body = '<form id="perte-form">' +
+      '<div class="field"><label>Taille</label><select name="taille" required>' +
+      '<option value="">—</option>' +
+      sizes.map(function(sz){ return '<option value="' + sz + '">' + sz + ' (' + ref.tailles[sz].stock + ' en stock)</option>'; }).join("") +
+      '</select></div>' +
+      '<div class="field" style="margin-top:12px;"><label>Quantité perdue</label><input type="number" name="qty" min="1" value="1" required></div>' +
+      '<div class="field text" style="margin-top:12px;"><label>Précision (facultatif)</label><input type="text" name="motif" placeholder="Ex. volé, taché, introuvable à l’inventaire…"></div>' +
+      '<button type="submit" class="btn primary block" style="margin-top:16px;">Signaler la perte</button>' +
+      '</form>';
+    openSheet("Perte — " + ref.nom, body);
+    var form = sheetBody.querySelector("#perte-form");
+    form.addEventListener("submit", function(e){
+      e.preventDefault();
+      var fd = new FormData(form);
+      var taille = fd.get("taille");
+      var qty = Math.max(1, parseInt(fd.get("qty"), 10) || 0);
+      var motif = (fd.get("motif") || "").trim();
+      if(!taille || !ref.tailles[taille]) return;
+      var before = ref.tailles[taille].stock;
+      if(qty > before){ toast("Quantité supérieure au stock disponible"); return; }
+      closeSheet();
+      showConfirm(
+        "Confirmer la perte de " + qty + " × " + ref.nom + " (" + taille + ") ? Le stock passera de " + before + " à " + (before - qty) + ".",
+        function(){
+          var current = refById(refId);
+          if(!current || !current.tailles[taille] || current.tailles[taille].stock < qty){
+            toast("Stock modifié entre-temps — perte non enregistrée");
+            return;
+          }
+          current.tailles[taille].stock -= qty;
+          state.pertes = state.pertes || [];
+          state.pertes.push({ id: uid(), ts: Date.now(), refId: current.id, refNom: current.nom, taille: taille, qty: qty, motif: motif });
+          saveState();
+          renderStock(); renderVente();
+          toast("Perte enregistrée — " + qty + " × " + current.nom + " " + taille);
+        },
+        { confirmLabel: "Confirmer la perte", danger: true }
+      );
+    });
+  }
+
   function undoSale(saleId){
     var idx = state.sales.findIndex(function(s){ return s.id === saleId; });
     if(idx === -1) return;
@@ -925,6 +976,7 @@
     html += newRefFormHtml();
     html += historyHtml();
     html += donsHtml();
+    html += pertesHtml();
     html += statsHtml();
     html += settingsHtml();
     el.innerHTML = html;
@@ -945,6 +997,21 @@
       });
     });
     wireStockEvents(el);
+  }
+
+  function pertesHtml(){
+    var pertes = state.pertes || [];
+    if(pertes.length === 0) return "";
+    var html = '<h2 class="section-title">Pertes signalées</h2>';
+    html += '<div class="log-list" style="margin-bottom:14px;">';
+    pertes.slice().reverse().forEach(function(p){
+      var t = new Date(p.ts);
+      html += '<div class="log-row"><time>' + t.toLocaleDateString("fr-FR", {day:"2-digit", month:"2-digit"}) + '</time>' +
+        '<span class="ref">' + escapeHtml(p.refNom) + ' · ' + p.taille + ' · ' + p.qty + '×</span>' +
+        '<span style="color:var(--ink-dim); font-size:12px; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + escapeHtml(p.motif || "—") + '</span></div>';
+    });
+    html += '</div>';
+    return html;
   }
 
   function donsHtml(){
@@ -1127,7 +1194,7 @@
       h += '<div class="field" style="margin-top:10px; max-width:220px;"><label>Ajouter une taille</label><select class="in-addsize"><option value="">—</option>' +
         remaining.map(function(s){ return '<option value="' + s + '">' + s + '</option>'; }).join("") + '</select></div>';
     }
-    h += '<div class="stock-foot"><button class="btn ghost sm btn-don" title="Enregistrer un don de t-shirt">Don de t-shirt</button><button class="btn primary sm btn-save">Enregistrer</button></div>';
+    h += '<div class="stock-foot"><div class="stock-foot-group"><button class="btn ghost sm btn-don" title="Enregistrer un don de t-shirt">Don de t-shirt</button><button class="btn ghost sm danger btn-perte" title="Retirer du stock un t-shirt perdu, volé ou abîmé">Signaler une perte</button></div><button class="btn primary sm btn-save">Enregistrer</button></div>';
     h += '</div>';
     return h;
   }
@@ -1191,6 +1258,9 @@
       card.querySelector(".btn-don").addEventListener("click", function(){
         openDonSheet(refId);
       });
+      card.querySelector(".btn-perte").addEventListener("click", function(){
+        openPerteSheet(refId);
+      });
     });
 
     var form = document.getElementById("new-ref-form");
@@ -1244,6 +1314,7 @@
         if(!state.sales) state.sales = [];
         if(!state.history) state.history = [];
         if(!state.dons) state.dons = [];
+        if(!state.pertes) state.pertes = [];
         if(!state.sessionStart) state.sessionStart = Date.now();
         saveState();
         renderStock(); renderVente(); renderRapport();
@@ -1252,8 +1323,8 @@
     });
     var resetBtn = document.getElementById("btn-reset-all");
     if(resetBtn) resetBtn.addEventListener("click", function(){
-      showConfirm("Réinitialiser TOUTES les données (références, stocks, ventes, historique, dons) ? Cette action est irréversible.", function(){
-        state = { references: [], sales: [], history: [], dons: [], sessionStart: Date.now() };
+      showConfirm("Réinitialiser TOUTES les données (références, stocks, ventes, historique, dons, pertes) ? Cette action est irréversible.", function(){
+        state = { references: [], sales: [], history: [], dons: [], pertes: [], sessionStart: Date.now() };
         saveState();
         renderStock(); renderVente(); renderRapport();
         toast("Données réinitialisées");
